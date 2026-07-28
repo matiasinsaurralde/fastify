@@ -14,7 +14,9 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 |---|--------|-------|--------|
 | A | Content-Type / charset / body parsing | content-type-parser.js, content-type.js, handle-request.js, rawBody | **CANDIDATE (A1)** — reported |
 | B | Routing / find-my-way / constraints | find-my-way, route.js, four-oh-four.js | **✅ CONFIRMED B1 (HIGH DoS)** + B2 (MED) — done; route-confusion/constraint-bypass ruled out |
-| K | RCE / code-generation sink audit | fast-json-stringify, ajv-compiler, find-my-way new Function() | OPEN — running (wave 2) |
+| K | RCE / code-generation sink audit | fast-json-stringify, ajv-compiler, find-my-way new Function() | **done** — no remote RCE; K1 dev-tainted codegen sink (chaining primitive) |
+| L | Encapsulation / hook-scope / auth-bypass | route.js, head-route.js, hooks.js, four-oh-four.js, plugin-override.js | OPEN — running (wave 3) |
+| V | Adversarial verification of B1/C1/A1 | independent PoCs, severity bounding | OPEN — running (wave 3) |
 | C | Validation / serialization / mass-assignment | validation.js, schema-controller.js, ajv-compiler, fast-json-stringify | **✅ CONFIRMED C1 (HIGH DoS)** + C2 (MED) — done; response-leak ruled out |
 | D | Prototype pollution chains | secure-json-parse, query parsing, params, decorate.js, defaults | **BLOCKED** — hardened, no mechanism |
 | E | Cross-request state leakage / lifecycle / race | request.js, reply.js, context.js, hooks.js, handle-request.js, toad-cache | OPEN — running |
@@ -41,6 +43,11 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 - **Independently VERIFIED (my poc-quad.js)**: path 15 KB (~5000×`%25`) = **6.3 ms/call** vs 0.19 ms benign (33×); doubling length ≈ 4× time (quadratic): 30 KB→29 ms, 60 KB→108 ms. Agent B end-to-end: 90 KB→1.2 s, 150 KB→5.9 s single-request event-loop freeze.
 - **Impact**: unauthenticated availability DoS. Default 16 KB URL cap ⇒ ~6 ms synchronous event-loop block per request (single-threaded Node → blocks ALL clients; ~150 req/s saturates a core; strong amplification). With raised `--max-http-header-size` (common for large JWT/cookie apps) ⇒ single request freezes the loop for 1–6 s. Confidence: HIGH (mechanism + measurement).
 - **Fix direction**: don't rebuild the string per-occurrence (build once, or track an offset), and/or cap path length before decode.
+
+### CANDIDATE K1 — [RCE, chaining primitive — NOT remotely reachable in base model] `new Function` route-param-name injection (find-my-way)
+- `node_modules/find-my-way/lib/handler-storage.js:71,78`: `_compileCreateParamsObject` concatenates the route **param name** raw into `new Function` source: `params['${params[i]}'] = paramsArray[${i}]` — no escaping. A param name with `'` breaks out → arbitrary JS at compile time. Agent K PoC: `execSync('id')`→uid=0.
+- **Taint source is the DEVELOPER route pattern** (`router.on(method, path)`, boot-time). Remote client controls only URL → param VALUES (passed as runtime array arg, never into source). **Not remotely exploitable by itself.** It is a chaining primitive: RCE iff an app/plugin registers routes whose param names derive from untrusted input (user-supplied OpenAPI, DB-driven/multi-tenant dynamic routes). Also #2/#3: constraint/strategy names embedded raw (weaker, dev-tainted). All other codegen sinks (fast-json-stringify, ajv, node.js prefix match) are attacker-safe (dev schema source; request data is runtime arg, escaped).
+- Note: `lib/req-id-gen-factory.js` default id is a plain incrementing counter (`req-<base36>`), not crypto — fine as a trace id; only a problem if an app misuses `request.id` as a token (app issue). `requestIdHeader` (default false) would take the id from an attacker header (log-injection/spoof) if enabled. The brief's "encryption sanity checking" hint dead-ends in core (no crypto on the request path).
 
 ### CANDIDATE B2 — [MED, conditional] Unbounded `regexCache` memory DoS (find-my-way accept-host)
 - `node_modules/find-my-way/lib/strategies/accept-host.js:7,16,22`: if the app registers any **RegExp** `host` constraint, every distinct attacker `Host` header (matches AND non-matches, line 22) is cached permanently in a `Map` with no cap/eviction → unbounded growth → OOM. PoC (agent B): 500k unique hosts → +47 MB. Precondition: app uses a RegExp host constraint (uncommon). Not a data leak (host-keyed, deterministic).

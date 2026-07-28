@@ -8,6 +8,23 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 
 ---
 
+## EXECUTIVE SUMMARY — confirmed, remotely-exploitable findings (all independently PoC-verified)
+
+| ID | Sev | Class | One-line | Precondition | Verified by |
+|----|-----|-------|----------|--------------|-------------|
+| **B1** | **HIGH** | DoS (algorithmic) | O(n²) event-loop freeze from a URL path of repeated `%25` (`find-my-way/lib/url-sanitizer.js:66`), pre-auth, every request | none (default) | me + agent B |
+| **C1** | **HIGH** | DoS (algorithmic) | O(n²) event-loop freeze from a `uniqueItems:true` array body (AJV `loopN2`); 1 MB → 28 s–3 min | route has `uniqueItems` on an array of objects/no-scalar-items (common) | me + agents C & J (triple) |
+| **A1** | **MED-HIGH** | Validation bypass | OpenAPI `content`-form body schema silently skips validation when `request.mediaType` isn't a content-map key (`lib/validation.js:174`) → mass assignment | route uses `content` body form + any object-producing parser for a non-listed type | me + agent A |
+| **G1** | **MED** | Response-framing desync | HEAD (or CL-set) to a `reply.trailer()` GET route emits both `Content-Length` and `Transfer-Encoding: chunked` (`reply.js:590-601` skips CL cleanup) → smuggling/cache-poisoning primitive | route uses `reply.trailer()`; non-RFC-strict intermediary | me + agent G |
+
+Secondary candidates: **B2** (unbounded regexCache OOM if RegExp host constraint used), **C2** (`removeAdditional:true` strips props defined under `allOf`/`oneOf`/`$ref`/`if-then` → data-loss/situational bypass), **K1** (find-my-way `_compileCreateParamsObject` builds `new Function` from an unescaped route param name → RCE if param names ever derive from untrusted input — a chaining primitive), **G2/G3** (trailer CL+TE variants).
+
+Ruled out (with PoCs): prototype pollution (D — secure-json-parse + flat query parser hardened), cross-request shared-state/race leakage (E — 6000+ concurrent/pipelined reqs, 0 leaks), trust-proxy/IP-spoof & response-splitting (F — correct; Node blocks CRLF), remote RCE (K — all codegen sinks take dev-authored source; request data is runtime-arg-only), request-side HTTP smuggling (G — llhttp frames, Fastify drains/closes).
+
+Common theme of the two HIGH findings: **unbounded attacker-controlled input driving an O(n²) routine that runs synchronously on the single event-loop thread** — no per-request work cap precedes it.
+
+---
+
 ## Approach Family Registry
 
 | # | Family | Scope | Status |

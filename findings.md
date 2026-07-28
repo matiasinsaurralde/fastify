@@ -10,19 +10,22 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 
 ## EXECUTIVE SUMMARY — confirmed, remotely-exploitable findings (all independently PoC-verified)
 
+Severities below are POST adversarial-verification (agent V independently re-PoC'd B1/C1/A1 and bounded them; honest ceilings shown).
+
 | ID | Sev | Class | One-line | Precondition | Verified by |
 |----|-----|-------|----------|--------------|-------------|
-| **B1** | **HIGH** | DoS (algorithmic) | O(n²) event-loop freeze from a URL path of repeated `%25` (`find-my-way/lib/url-sanitizer.js:66`), pre-auth, every request | none (default) | me + agent B |
-| **C1** | **HIGH** | DoS (algorithmic) | O(n²) event-loop freeze from a `uniqueItems:true` array body (AJV `loopN2`); 1 MB → 28 s–3 min | route has `uniqueItems` on an array of objects/no-scalar-items (common) | me + agents C & J (triple) |
+| **I1** | **HIGH** | Remote process crash | Unguarded async hook-runner continuation (`hooks.js:303-310`): a sync throw in the terminal `cb` (`onSendEnd`→`safeWriteHead` on an invalid header) → unhandledRejection → **Node aborts**. `GET /?v=%0A` kills the server | app has an **async `onSend`/preSerialization hook** reflecting request data into a header (or async validation/auth + throw-on-send handler) | me (live, exit 1) + agent I |
+| **C1** | **HIGH** (conditional) | DoS (algorithmic) | O(n²) event-loop freeze from a `uniqueItems:true` array body (AJV `loopN2`); 1 MB → ~25 s–3 min, whole server starved | route declares `uniqueItems` on an array of objects / no scalar `items` and no `maxItems` (AJV footgun) | me + agents C, J, V (quad) |
 | **L1** | **MED-HIGH** | Auth bypass | `onRoute` never fires for the auto-registered trailing-slash twin of a prefixed plugin's `/` route (`route.js:262` `prefixing:true` + `:293` gate) → `GET /prefix/` reachable but invisible to onRoute-based authz/WAF/rate-limit | route at `/` in a prefixed plugin + onRoute-enumeration security control | me + agent L |
-| **A1** | **MED-HIGH** | Validation bypass | OpenAPI `content`-form body schema silently skips validation when `request.mediaType` isn't a content-map key (`lib/validation.js:174`) → mass assignment | route uses `content` body form + any object-producing parser for a non-listed type | me + agent A |
+| **B1** | **MED** default / **HIGH** raised-header | DoS (algorithmic) | O(n²) in `find-my-way/url-sanitizer.js:66` (`%25` path rebuild), pre-auth, every request. Node caps URL at 16 KB → ~20–28 ms/req amplification by default; with raised `--max-http-header-size` (common) 256 KB→32 s, 512 KB→118 s single-request freeze | none by default (amplification); one-shot needs raised header cap | me + agents B, V |
 | **G1** | **MED** | Response-framing desync | HEAD (or CL-set) to a `reply.trailer()` GET route emits both `Content-Length` and `Transfer-Encoding: chunked` (`reply.js:590-601` skips CL cleanup) → smuggling/cache-poisoning primitive | route uses `reply.trailer()`; non-RFC-strict intermediary | me + agent G |
+| A1 | LOW (documented) | Validation skip | content-form body schema skips validation on a media-type miss (`validation.js:174`) | **documented behavior** (docs ⚠ warning, `Validation-and-Serialization.md:253,260-274`); content-form + non-default object parser; default = string only | me + agents A, V |
 
-Secondary candidates: **B2** (unbounded regexCache OOM if RegExp host constraint used), **C2** (`removeAdditional:true` strips props defined under `allOf`/`oneOf`/`$ref`/`if-then` → data-loss/situational bypass), **K1** (find-my-way `_compileCreateParamsObject` builds `new Function` from an unescaped route param name → RCE if param names ever derive from untrusted input — a chaining primitive), **G2/G3** (trailer CL+TE variants).
+Secondary candidates: **I-C2** (async validation/auth + throw-on-send handler → same crash; broader trigger), **B2** (unbounded regexCache OOM if RegExp host constraint used), **C2** (`removeAdditional:true` strips props defined under `allOf`/`oneOf`/`$ref`/`if-then` → data-loss/situational bypass), **K1** (find-my-way `_compileCreateParamsObject` builds `new Function` from an unescaped route param name → RCE if param names ever derive from untrusted input — a chaining primitive), **L2** (synthetic HEAD announced to onRoute as method:HEAD → per-verb guard bypass + existence oracle), **G2/G3** (trailer CL+TE variants).
 
 Ruled out (with PoCs): prototype pollution (D — secure-json-parse + flat query parser hardened), cross-request shared-state/race leakage (E — 6000+ concurrent/pipelined reqs, 0 leaks), trust-proxy/IP-spoof & response-splitting (F — correct; Node blocks CRLF), remote RCE (K — all codegen sinks take dev-authored source; request data is runtime-arg-only), request-side HTTP smuggling (G — llhttp frames, Fastify drains/closes).
 
-Common theme of the two HIGH findings: **unbounded attacker-controlled input driving an O(n²) routine that runs synchronously on the single event-loop thread** — no per-request work cap precedes it.
+Strongest, most novel finding: **I1 — a single unauthenticated request crashes the whole Fastify process** (core hook-runner defect, not an app footgun). Themes: (a) unguarded async continuations turn a would-be 500 into a process kill; (b) unbounded attacker input drives O(n²) routines on the single event-loop thread; (c) core route/hook bookkeeping (onRoute twin, CL+TE) diverges from what security controls observe.
 
 ---
 
@@ -35,20 +38,29 @@ Common theme of the two HIGH findings: **unbounded attacker-controlled input dri
 | K | RCE / code-generation sink audit | fast-json-stringify, ajv-compiler, find-my-way new Function() | **done** — no remote RCE; K1 dev-tainted codegen sink (chaining primitive) |
 | L | Encapsulation / hook-scope / auth-bypass | route.js, head-route.js, hooks.js, four-oh-four.js, plugin-override.js | **✅ CONFIRMED L1 (MED-HIGH auth bypass)** + L2 — done; HEAD-skips-preHandler disproved |
 | M | Logging path (pino) crash/DoS/log-injection | logger-factory.js, log-controller.js, pino, pino-std-serializers | OPEN — running (wave 3) |
-| V | Adversarial verification of B1/C1/A1 | independent PoCs, severity bounding | OPEN — running (wave 3) |
+| V | Adversarial verification of B1/C1/A1 | independent PoCs, severity bounding | **done** — B1→MED(default)/HIGH(raised); C1→HIGH(conditional); A1→LOW(documented) |
 | C | Validation / serialization / mass-assignment | validation.js, schema-controller.js, ajv-compiler, fast-json-stringify | **✅ CONFIRMED C1 (HIGH DoS)** + C2 (MED) — done; response-leak ruled out |
 | D | Prototype pollution chains | secure-json-parse, query parsing, params, decorate.js, defaults | **BLOCKED** — hardened, no mechanism |
 | E | Cross-request state leakage / lifecycle / race | request.js, reply.js, context.js, hooks.js, handle-request.js, toad-cache | OPEN — running |
 | F | Trust-proxy / header parsing / reply header injection | proxy-addr, request.js (ip/host/proto), reply.js headers | OPEN — running |
 | G | HTTP framing / request smuggling / keep-alive desync | Fastify↔Node HTTP boundary, TE/CL, QUERY, pipelining | **✅ CONFIRMED G1 (MED desync)** + G2/G3 — done; request-side smuggling safe |
-| I | Error/hook state machine / crash / double-send | error-handler.js, hooks.js, wrap-thenable.js, content-type-parser done() | OPEN — running (wave 2) |
+| I | Error/hook state machine / crash / double-send | error-handler.js, hooks.js, wrap-thenable.js, content-type-parser done() | **✅ CONFIRMED I1 (HIGH remote crash)** + I-C2 — done |
 | J | DoS / resource exhaustion / ReDoS / stack overflow | JSON.parse, AJV, fast-json-stringify, fmw | **done** — corroborates C1 (HIGH); no crash (all caught→500) |
 
 ---
 
 ## Confirmed / Candidate Findings
 
-### ✅ CONFIRMED B1 — [HIGH] O(n²) event-loop DoS via `%25` in URL path (find-my-way)
+### ✅ CONFIRMED I1 — [HIGH] Remote unauthenticated PROCESS CRASH via unguarded async hook-runner continuation
+- **Root cause (Fastify core)**: `onSendHookRunner`/`preSerializationHookRunner` (`lib/hooks.js:303-310`) run an async hook's promise as `result.then(handleResolve, handleReject)` — a **discarded promise**. `handleResolve` → `next` → terminal `cb` (`wrapOnSendEnd` → `onSendEnd` → `safeWriteHead`) runs SYNCHRONOUSLY inside that continuation. A sync throw there (e.g. `res.writeHead` on an invalid header value — `safeWriteHead` re-throws non-HEADERS_SENT errors at `reply.js:576-582`) is NOT caught (the try/catch at `hooks.js:297` only guards the hook INVOCATION, not the continuation) → **unhandledRejection → Node ≥15 aborts the process**. (Sibling unguarded continuations: `hooks.js:253`, `handle-request.js:133` async-validation `.then(cb,cb)`.)
+- **Trigger (I-C1, cleanest)**: app has an **async `onSend` hook** that reflects a request-derived value into a response header (common: CORS origin reflection, correlation/trace-id echo, custom header plugins), e.g. `async (req,reply,payload)=>{ reply.header('x-echo', req.query.v); return payload }`. Attacker: `GET /?v=%0Ainjected` (newline; also `%00`, emoji/non-Latin1).
+- **Independently VERIFIED (my poc-ic1.js, default Node v22.22.2, real server)**: process **exits code 1** with uncaught `TypeError [ERR_INVALID_CHAR]`, stack: `safeWriteHead (reply.js:576) → onSendEnd (reply.js:688) → wrapOnSendEnd (reply.js:569) → next (hooks.js:292) → handleResolve (hooks.js:309) → processTicksAndRejections`. Single request kills the entire server.
+- **Trigger (I-C2, HIGH)**: async validation (stock `$async` AJV schema, or custom async validator) OR async preValidation/preHandler (e.g. async auth) + a sync handler whose return makes `reply.send` throw (non-JSON content-type + object return, e.g. a CSV route returning an array). Throw at `handle-request.js:221` escapes the async boundary → unhandledRejection → crash (agent I `poc5`: async-auth + CSV dies on one GET).
+- **Impact**: single unauthenticated request → whole-process crash (all in-flight requests dropped; crash-loop DoS even behind a supervisor). Precondition is an app that uses async onSend/preSerialization hooks reflecting request data into headers, or async validation/auth + a throw-on-send handler — realistic patterns. **HIGH.** (I-C3 LOW: out-of-range `error.statusCode`/throwing `error.headers` → response corruption, app-controlled fields, not remotely reachable alone.)
+- **Fix**: wrap the hook-runner continuation (`handleResolve`/`next`/terminal cb) in try/catch that routes to the error path, not the socket.
+
+### ✅ CONFIRMED B1 — [MEDIUM default / HIGH with raised header-size] O(n²) event-loop DoS via `%25` in URL path (find-my-way)
+- **Post-verification (agent V)**: Node hard-caps the URL at 16 KB (>16 KB → 431), so a single default-config request is bounded to ~20–28 ms event-loop block (amplification flood, ~450× vs benign, saturates a core at modest RPS), NOT a multi-second freeze. The seconds–minutes freeze requires a raised `--max-http-header-size` (V measured 256 KB→32 s, 512 KB→118 s) — a common ops setting for large JWT/cookie apps. Honest severity: **MEDIUM default, HIGH with raised header cap.**
 - **Sink**: `node_modules/find-my-way/lib/url-sanitizer.js:66` in `safeDecodeURI()`:
   ```js
   if (highCharCode === 50 && lowCharCode === 53) {   // '%25'
@@ -106,7 +118,8 @@ Common theme of the two HIGH findings: **unbounded attacker-controlled input dri
 - Fastify defaults AJV to `removeAdditional:true` (vanilla AJV = false). With `additionalProperties:false` combined with `allOf`/`oneOf`/`$ref`/`if-then`, AJV strips properties that ARE defined in the subschemas while still validating `ok:true` → data loss / situational bypass (e.g., an authz/conditional field defined only in a branch is dropped before the handler sees it). App-dependent impact. (C3 LOW: `coerceTypes:'array'` single-element unwrap / `null→""` massaging.)
 - Note: agent C confirms **response serialization is a faithful whitelist — no info-leak beyond the developer's schema** (weakens my A1-sibling response-leak note to LOW; only the content-form mediaType-miss `false→JSON.stringify` corner remains, narrow).
 
-### ✅ CONFIRMED A1 — [MED-HIGH, precondition-gated] Content-form body schema silently skips validation (bypass)
+### ⚠ A1 — [LOW / informational — DOCUMENTED behavior] Content-form body schema silently skips validation
+- **Post-verification (agent V + my docs check)**: this is **explicitly documented** at `docs/Reference/Validation-and-Serialization.md:253` ("Other content types will not be validated") and a full ⚠ warning at `:260-274`. It requires the uncommon OpenAPI `content` body-schema form; under DEFAULT parsers it yields only an unvalidated STRING (a clean object needs a non-default parser e.g. @fastify/formbody). Downgraded to LOW/informational — real and reproducible, but intended/documented, not a novel zero-day. Kept here for completeness. Original analysis below.
 - Sink: `lib/validation.js:174` — `const contentSchema = context[bodySchema][request.mediaType]`. For OpenAPI-style `schema.body.content = { 'application/json': {...} }`, `context[bodySchema]` is a plain object keyed by content-type (`validation.js:89-97`). Validator chosen by attacker-controlled `request.mediaType`. On key miss → `validatorFunction=null` → `validateParam(null)` returns `false` (no error) → **body validation fully skipped**.
 - Attacker: `POST /route` with a `Content-Type` that HAS a parser but is NOT a content-map key. Default config: `text/plain` yields an unvalidated **string** body (weak). Escalation to unvalidated **object** body requires the app to have an object-producing parser for a non-listed type (urlencoded, vendor `+json`, catch-all `*`) — common in real apps.
 - Precondition: route uses the `content` form of `schema.body` (less common). Plain `schema.body={type:'object'}` form is a function and NOT affected.

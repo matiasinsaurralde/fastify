@@ -23,6 +23,7 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 | F | Trust-proxy / header parsing / reply header injection | proxy-addr, request.js (ip/host/proto), reply.js headers | OPEN — running |
 | G | HTTP framing / request smuggling / keep-alive desync | Fastify↔Node HTTP boundary, TE/CL, QUERY, pipelining | OPEN — running (wave 2) |
 | I | Error/hook state machine / crash / double-send | error-handler.js, hooks.js, wrap-thenable.js, content-type-parser done() | OPEN — running (wave 2) |
+| J | DoS / resource exhaustion / ReDoS / stack overflow | JSON.parse, AJV, fast-json-stringify, fmw | **done** — corroborates C1 (HIGH); no crash (all caught→500) |
 
 ---
 
@@ -57,6 +58,8 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 - **Precondition**: a route schema declares `{ type:'array', uniqueItems:true }` without a small `maxItems` (a common "unique list" pattern). Attacker sends a large array body.
 - **Independently VERIFIED (my poc-unique.js)**: no-items-type ints: n=5000→31ms, 10000→104ms, 20000→403ms, 40000→**1004ms** (quadratic ~4×/2×); **20000 objects → 8116ms**; control `items:{type:integer}` 40000 → 8.85ms (safe O(n)). Agent C end-to-end on a real server: one 1MB body (~164k ints) froze it **27.7s**; 40k objects → 31.7s; concurrent requests all starved. ~50k objects in 1MB ⇒ minutes.
 - **Impact**: single unauthenticated request → total event-loop starvation for tens of seconds to minutes (all clients blocked; Node single-threaded). `requestTimeout` can't fire during a synchronous loop; `bodyLimit` 1MB is ample. Confidence HIGH.
+- **TRIPLE-CONFIRMED**: agent C (27.7s live), agent J (8.28s live for 228KB/20k objects; extrapolates ~28s ints / 155–180s objects at 1MB), and my poc-unique.js (20k objects=8.1s). Precondition is BROAD: any `uniqueItems:true` on an array of **objects** (very common "list of unique records") is O(n²), not just the no-items-type case — only SCALAR `items` type is safe (O(n) hash).
+- J dead-ends (no process crash): deep-nested body stack overflow, recursive-$ref validate/serialize, async-handler RangeError all **caught → 500** (`validation.js:124-128`, `reply.js:538`, `wrap-thenable.js:41`); secure-json-parse proto scan is iterative BFS (linear, no overflow); fast-json-stringify anyOf linear; content-type/fqs/fmw linear or 16KB-capped.
 
 ### CANDIDATE C2 — [MED, Fastify-default] `removeAdditional:true` + composition silently strips valid data
 - Fastify defaults AJV to `removeAdditional:true` (vanilla AJV = false). With `additionalProperties:false` combined with `allOf`/`oneOf`/`$ref`/`if-then`, AJV strips properties that ARE defined in the subschemas while still validating `ok:true` → data loss / situational bypass (e.g., an authz/conditional field defined only in a branch is dropped before the handler sees it). App-dependent impact. (C3 LOW: `coerceTypes:'array'` single-element unwrap / `null→""` massaging.)

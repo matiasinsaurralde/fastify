@@ -21,7 +21,7 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 | D | Prototype pollution chains | secure-json-parse, query parsing, params, decorate.js, defaults | **BLOCKED** — hardened, no mechanism |
 | E | Cross-request state leakage / lifecycle / race | request.js, reply.js, context.js, hooks.js, handle-request.js, toad-cache | OPEN — running |
 | F | Trust-proxy / header parsing / reply header injection | proxy-addr, request.js (ip/host/proto), reply.js headers | OPEN — running |
-| G | HTTP framing / request smuggling / keep-alive desync | Fastify↔Node HTTP boundary, TE/CL, QUERY, pipelining | OPEN — running (wave 2) |
+| G | HTTP framing / request smuggling / keep-alive desync | Fastify↔Node HTTP boundary, TE/CL, QUERY, pipelining | **✅ CONFIRMED G1 (MED desync)** + G2/G3 — done; request-side smuggling safe |
 | I | Error/hook state machine / crash / double-send | error-handler.js, hooks.js, wrap-thenable.js, content-type-parser done() | OPEN — running (wave 2) |
 | J | DoS / resource exhaustion / ReDoS / stack overflow | JSON.parse, AJV, fast-json-stringify, fmw | **done** — corroborates C1 (HIGH); no crash (all caught→500) |
 
@@ -44,6 +44,21 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 - **Independently VERIFIED (my poc-quad.js)**: path 15 KB (~5000×`%25`) = **6.3 ms/call** vs 0.19 ms benign (33×); doubling length ≈ 4× time (quadratic): 30 KB→29 ms, 60 KB→108 ms. Agent B end-to-end: 90 KB→1.2 s, 150 KB→5.9 s single-request event-loop freeze.
 - **Impact**: unauthenticated availability DoS. Default 16 KB URL cap ⇒ ~6 ms synchronous event-loop block per request (single-threaded Node → blocks ALL clients; ~150 req/s saturates a core; strong amplification). With raised `--max-http-header-size` (common for large JWT/cookie apps) ⇒ single request freezes the loop for 1–6 s. Confidence: HIGH (mechanism + measurement).
 - **Fix direction**: don't rebuild the string per-occurrence (build once, or track an offset), and/or cap path length before decode.
+
+### ✅ CONFIRMED G1 — [MEDIUM] Response-framing desync: `Content-Length` + `Transfer-Encoding: chunked` on same response (reply.trailer + HEAD)
+- **Root cause (Fastify core)**: `onSendEnd` (`lib/reply.js:590-601`) sets `Transfer-Encoding: chunked` + `Trailer` when `reply.trailer()` is used but **never deletes a `content-length`** already set; the CL-reconciliation at `reply.js:677-686` is gated on `reply[kReplyTrailers] === null`, so it is skipped when trailers exist. Auto-HEAD's onSend handler (`lib/head-route.js:29-31`) sets `content-length` = body byte size. Net: a HEAD to any GET route that uses `reply.trailer()` emits BOTH headers.
+- **Independently VERIFIED (my poc-g1b.js, real server + raw socket)**: `HEAD /data` →
+  ```
+  HTTP/1.1 200 OK
+  content-length: 7
+  transfer-encoding: chunked
+  trailer: x-checksum
+  ```
+  (empty body, keep-alive). GET /data correctly uses chunked only. RFC 9112 §6.1 violation confirmed.
+- **Impact**: response-framing ambiguity → desync/smuggling primitive. A downstream intermediary that frames the HEAD response by `content-length: 7` reads 7 bytes (`HTTP/1.`) of the FOLLOWING response as the HEAD body, offsetting all subsequent response boundaries → response smuggling / cache poisoning / cross-client response leak. Unauthenticated (attacker just uses HEAD; auto-HEAD default-on). **MEDIUM**: real-world exploit needs a non-RFC-compliant / CL-preferring intermediary (a compliant proxy ignores CL/TE for HEAD). Precondition: a GET route uses `reply.trailer()`.
+- **G2 (same root cause, MED)**: caller-set `content-length` + `reply.trailer()` on a non-HEAD GET → CL+TE with a real chunked body (bogus CL over-reads next response). **G3 (LOW)**: `reply.trailer()` + 204/304 → `ERR_HTTP_TRAILER_INVALID` caught → 500 (broken endpoint, not a crash).
+- **Fix**: delete `content-length` when switching to trailer/chunked framing in `onSendEnd`.
+- **Request-side smuggling = SAFE** (agent G, all live-fired): Node/llhttp is the sole body-framing authority; Fastify early-response paths leave `req._consuming===false` (Node `_dump()` auto-drains CL and chunked) or set `connection: close` on parse errors; llhttp rejects CL+TE / dup-CL below Fastify. Bodyless-with-body, QUERY/415 paths, CL.TE/TE.CL, timeouts, maxRequestsPerSocket — all safe.
 
 ### CANDIDATE K1 — [RCE, chaining primitive — NOT remotely reachable in base model] `new Function` route-param-name injection (find-my-way)
 - `node_modules/find-my-way/lib/handler-storage.js:71,78`: `_compileCreateParamsObject` concatenates the route **param name** raw into `new Function` source: `params['${params[i]}'] = paramsArray[${i}]` — no escaping. A param name with `'` breaks out → arbitrary JS at compile time. Agent K PoC: `execSync('id')`→uid=0.

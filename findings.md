@@ -8,7 +8,9 @@ Method: first-principles code analysis (NO git history / changelog / internet di
 
 ---
 
-## EXECUTIVE SUMMARY — confirmed, remotely-exploitable findings (all independently PoC-verified)
+## EXECUTIVE SUMMARY — confirmed, remotely-exploitable findings
+
+**Verification boundary (honest):** the FIVE confirmed findings below (I1, C1, L1, B1, G1) were each reproduced END-TO-END by the root agent on a real Fastify server / raw socket (`scratchpad/poc-{ic1,ic1-asym,c1-e2e,l1,b1-e2e,g1b}.js`), in addition to the subagent PoCs. The SECONDARY candidates (I-C2, B2, C2, K1, L2, G2/G3, M2) and A1's object-escalation rest on SUBAGENT PoCs and my code reading — I did NOT independently re-run each of those, which is why they are labelled "candidate," not "confirmed."
 
 Severities below are POST adversarial-verification (agent V independently re-PoC'd B1/C1/A1 and bounded them; honest ceilings shown).
 
@@ -61,6 +63,7 @@ Strongest, most novel finding: **I1 — a single unauthenticated request crashes
 - **Fix**: wrap the hook-runner continuation (`handleResolve`/`next`/terminal cb) in try/catch that routes to the error path, not the socket.
 
 ### ✅ CONFIRMED B1 — [MEDIUM default / HIGH with raised header-size] O(n²) event-loop DoS via `%25` in URL path (find-my-way)
+- **My own end-to-end (`poc-b1-e2e.js`, real server)**: `%25`×5000 (15 KB) → 14.6 ms vs benign 15 KB → 8.8 ms (the ~6 ms delta = the O(n²) `safeDecodeURI`, matching my unit `poc-quad.js` 6.3 ms); `%25`×6000 (~18 KB) → **431** (Node URL cap). Confirms bounded amplification by default.
 - **Post-verification (agent V)**: Node hard-caps the URL at 16 KB (>16 KB → 431), so a single default-config request is bounded to ~20–28 ms event-loop block (amplification flood, ~450× vs benign, saturates a core at modest RPS), NOT a multi-second freeze. The seconds–minutes freeze requires a raised `--max-http-header-size` (V measured 256 KB→32 s, 512 KB→118 s) — a common ops setting for large JWT/cookie apps. Honest severity: **MEDIUM default, HIGH with raised header cap.**
 - **Sink**: `node_modules/find-my-way/lib/url-sanitizer.js:66` in `safeDecodeURI()`:
   ```js
@@ -112,7 +115,7 @@ Strongest, most novel finding: **I1 — a single unauthenticated request crashes
 - **Precondition**: a route schema declares `{ type:'array', uniqueItems:true }` without a small `maxItems` (a common "unique list" pattern). Attacker sends a large array body.
 - **Independently VERIFIED (my poc-unique.js)**: no-items-type ints: n=5000→31ms, 10000→104ms, 20000→403ms, 40000→**1004ms** (quadratic ~4×/2×); **20000 objects → 8116ms**; control `items:{type:integer}` 40000 → 8.85ms (safe O(n)). Agent C end-to-end on a real server: one 1MB body (~164k ints) froze it **27.7s**; 40k objects → 31.7s; concurrent requests all starved. ~50k objects in 1MB ⇒ minutes.
 - **Impact**: single unauthenticated request → total event-loop starvation for tens of seconds to minutes (all clients blocked; Node single-threaded). `requestTimeout` can't fire during a synchronous loop; `bodyLimit` 1MB is ample. Confidence HIGH.
-- **TRIPLE-CONFIRMED**: agent C (27.7s live), agent J (8.28s live for 228KB/20k objects; extrapolates ~28s ints / 155–180s objects at 1MB), and my poc-unique.js (20k objects=8.1s). Precondition is BROAD: any `uniqueItems:true` on an array of **objects** (very common "list of unique records") is O(n²), not just the no-items-type case — only SCALAR `items` type is safe (O(n) hash).
+- **QUAD-CONFIRMED, incl. my own end-to-end**: my `poc-c1-e2e.js` (real listening Fastify server) — a 497 KB POST of 40k distinct objects returned 200 after **26,121 ms** of total event-loop block; agent C (27.7s live), agent J (8.28s live for 228KB/20k objects), agent V (25.6s starvation), and my unit `poc-unique.js` (20k objects=8.1s). (My e2e heartbeat counter read 0ms — a mis-instrumentation artifact, since `setInterval` cannot fire during a synchronous freeze; the 26 s synchronous block IS the starvation proof.) Precondition is BROAD: any `uniqueItems:true` on an array of **objects** (very common "list of unique records") is O(n²), not just the no-items-type case — only SCALAR `items` type is safe (O(n) hash).
 - J dead-ends (no process crash): deep-nested body stack overflow, recursive-$ref validate/serialize, async-handler RangeError all **caught → 500** (`validation.js:124-128`, `reply.js:538`, `wrap-thenable.js:41`); secure-json-parse proto scan is iterative BFS (linear, no overflow); fast-json-stringify anyOf linear; content-type/fqs/fmw linear or 16KB-capped.
 
 ### CANDIDATE C2 — [MED, Fastify-default] `removeAdditional:true` + composition silently strips valid data

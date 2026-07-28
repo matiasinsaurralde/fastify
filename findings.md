@@ -37,7 +37,7 @@ Strongest, most novel finding: **I1 — a single unauthenticated request crashes
 | B | Routing / find-my-way / constraints | find-my-way, route.js, four-oh-four.js | **✅ CONFIRMED B1 (HIGH DoS)** + B2 (MED) — done; route-confusion/constraint-bypass ruled out |
 | K | RCE / code-generation sink audit | fast-json-stringify, ajv-compiler, find-my-way new Function() | **done** — no remote RCE; K1 dev-tainted codegen sink (chaining primitive) |
 | L | Encapsulation / hook-scope / auth-bypass | route.js, head-route.js, hooks.js, four-oh-four.js, plugin-override.js | **✅ CONFIRMED L1 (MED-HIGH auth bypass)** + L2 — done; HEAD-skips-preHandler disproved |
-| M | Logging path (pino) crash/DoS/log-injection | logger-factory.js, log-controller.js, pino, pino-std-serializers | OPEN — running (wave 3) |
+| M | Logging path (pino) crash/DoS/log-injection | logger-factory.js, log-controller.js, pino, pino-std-serializers | **done** — default path robust; M2 latent (custom throwing serializer → crash) |
 | V | Adversarial verification of B1/C1/A1 | independent PoCs, severity bounding | **done** — B1→MED(default)/HIGH(raised); C1→HIGH(conditional); A1→LOW(documented) |
 | C | Validation / serialization / mass-assignment | validation.js, schema-controller.js, ajv-compiler, fast-json-stringify | **✅ CONFIRMED C1 (HIGH DoS)** + C2 (MED) — done; response-leak ruled out |
 | D | Prototype pollution chains | secure-json-parse, query parsing, params, decorate.js, defaults | **BLOCKED** — hardened, no mechanism |
@@ -159,5 +159,25 @@ Implication: planted bug(s) likely live in **dependency logic or subtle core int
 
 ## Wave Log
 
-### Wave 1 (in progress)
-Launched 6 agents across families A–F.
+- **Wave 1** — families A–F (content-type, routing, validation/serialization, proto-pollution, cross-request, proxy/headers).
+- **Wave 2** — G (HTTP smuggling), I (error/crash state-machine), J (DoS/resource-exhaustion), K (RCE/codegen).
+- **Wave 3** — L (encapsulation/auth-bypass), M (logging), V (adversarial verifier of B1/C1/A1).
+- 14 agent runs total + root-agent independent verification (12 standalone PoC scripts in scratchpad). All families closed.
+
+## Additional candidate
+
+- **M2** — [latent/conditional] the per-request log emit (`route.js:522` → `incomingRequest` → `request.log.info({req})` → pino `_asJson`) has **no try/catch**; a custom `logSerializers` that throws on attacker data → uncaught exception → process crash (agent M live: exit 7). Not default-exploitable (built-in req/res/err serializers read bounded, non-throwing getters). Same "unguarded hot-path operation → crash" theme as I1. Default logging path is otherwise robust (requestIdHeader opt-in, CR/LF rejected, pino JSON-escapes).
+
+---
+
+## CONCLUSION
+
+From first-principles analysis (no changelog/CVE/diffing) plus 14 subagents and independent PoC verification, Fastify 5.10.0's default-config surfaces are largely well-hardened (proto-pollution, cross-request state, trust-proxy, serialization info-leak, remote RCE, and request-side HTTP smuggling were each ruled out with live PoCs). The confirmed remotely-exploitable issues are:
+
+1. **I1 (HIGH) — remote unauthenticated process crash.** Core defect: async hook-runner continuations (`lib/hooks.js:303-310`, and siblings at `:253`, `handle-request.js:133`) run the terminal callback inside a discarded promise with no try/catch, so a post-hook `writeHead` throw on an attacker-influenced invalid header becomes an unhandledRejection → Node aborts. Proven asymmetry vs. the sync path (which recovers to 500) confirms it is a framework bug. **Single request kills the server.** This is the strongest, most novel finding.
+2. **C1 (HIGH, conditional) — event-loop-freeze DoS** via `uniqueItems` O(n²) on an array body (25s–minutes; quad-verified).
+3. **L1 (MED-HIGH) — auth bypass**: the trailing-slash twin of a prefixed plugin's `/` route is routable but never announced to `onRoute`, blinding onRoute-based authz/WAF/rate-limit controls.
+4. **B1 (MED default / HIGH raised-header) — algorithmic DoS** via `%25` O(n²) URL decoding (pre-auth, every request).
+5. **G1 (MED) — response-framing desync** (`Content-Length` + `Transfer-Encoding: chunked` on the same response via `reply.trailer()` + HEAD).
+
+All findings are documented above with exact file:line, attacker input, live PoC results (scratchpad/poc-*.js), preconditions, and honest severity ceilings. Suggested fixes are noted per finding; the highest priority is wrapping the async hook-runner continuations (I1).

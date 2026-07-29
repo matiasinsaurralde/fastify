@@ -167,6 +167,36 @@ The stack trace is the smoking gun: `handleResolve (hooks.js:309)` →
 - No special privileges, no valid route data, no body needed — just a query
   string (or any request-controlled header value).
 
+## Variant — the invalid character need not be an attack (`poc-variant-benign-unicode.js`)
+
+The base PoC uses a newline (`%0A`), which reads like a header-injection attempt.
+But the crash is triggered by **any** Unicode code point > 0xFF, i.e. ordinary
+international text — an emoji, a CJK name, `€`, Cyrillic. (Node's
+`validateHeaderValue` rejects code points > 0xFF the same way it rejects control
+characters; raw request-header bytes stay Latin1, but **query/body/param values
+are UTF-8 decoded into real Unicode strings**, so they carry > 0xFF code points.)
+
+The variant app just echoes a query label into a response header — a completely
+ordinary pattern (trace id, cache key, debug, personalization). Verified output:
+
+```
+GET /?label=hello                  -> 200   (plain ASCII, fine)
+GET /?label=%E6%9D%B1%E4%BA%AC     (label = "東京" — ordinary text, NOT an attack)
+  TypeError [ERR_INVALID_CHAR] ... at safeWriteHead (reply.js:576) ... handleResolve (hooks.js:309)
+SERVER PROCESS EXITED  code=1
+```
+
+**Why it matters:** the crash is not gated on a malicious/CRLF payload, so
+"sanitize untrusted input" neither describes nor prevents it — the value is valid
+text a legitimate international user might send. To stop it app-side you would
+have to strip every non-Latin1 character from every reflected value, which is not
+what "sanitization" means and which no one does. This is the clearest evidence
+that the defect is the framework escalating a routine `ERR_INVALID_CHAR` (a 500
+on the sync path) into a whole-process crash on the async hook path — not an
+application input-handling mistake.
+
+Run: `node poc-variant-benign-unicode.js`
+
 ## Related (not in this PoC, documented in `../../findings.md`)
 
 - **I-C2** — same root cause reached via **async validation** (a stock AJV

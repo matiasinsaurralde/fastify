@@ -1,0 +1,11 @@
+{
+  "name": "uws-tls-smuggle-target",
+  "version": "1.0.0",
+  "private": true,
+  "description": "uWebSockets.js server (HTTP + HTTPS/TLS) used as an E2E target for the smuggling parser-deviation probe",
+  "type": "commonjs",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "uWebSockets.js": "uNetworking/uWebSockets.js#v20.51.0"
+  }
+}

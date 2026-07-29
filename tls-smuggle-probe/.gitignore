@@ -1,0 +1,8 @@
+# generated self-signed TLS material — never commit private keys
+server/certs/
+# native module (uWebSockets.js) — reinstall with `npm install` in server/
+server/node_modules/
+server/package-lock.json
+# go build artifacts
+/probe
+*.test

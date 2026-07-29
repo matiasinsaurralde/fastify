@@ -197,6 +197,35 @@ application input-handling mistake.
 
 Run: `node poc-variant-benign-unicode.js`
 
+## Variant — no header, no attacker data (`poc-variant-no-header-crash.js`)
+
+Removes headers and untrusted input from the picture to isolate the framework
+defect. An async `preHandler` (ubiquitous — e.g. `await verifyJwt()`) plus a
+sync handler that returns an object under a non-JSON content-type makes
+`reply.send` throw `FST_ERR_REP_INVALID_PAYLOAD_TYPE`. Verified asymmetry:
+
+```
+GET /export-plain    (no async hook)    -> 500   (sync path recovers, server lives)
+GET /export-guarded  (async preHandler) -> process crash (exit 1)
+
+FastifyError FST_ERR_REP_INVALID_PAYLOAD_TYPE ... { statusCode: 500 }   ← Fastify tags it 500
+    at onSendEnd (reply.js:674)
+    at Reply.send (reply.js:232)
+    at preHandlerCallbackInner (handle-request.js:221)
+    at next (hooks.js:236)
+    at handleResolve (hooks.js:253)     ← preHandler-runner continuation (sibling of onSend's :309)
+```
+
+**Why it matters:** the thrown error is *already labelled `statusCode: 500`* —
+Fastify knows it's a graceful response — yet the async continuation (`hooks.js:253`)
+turns it into an `unhandledRejection`/process abort, while the identical sync
+dispatch is caught by `handler()`'s try/catch and returns 500. No header, no
+reflected/attacker data anywhere: the only variable is whether the send-time
+error was reached through an async continuation. (An async `$async` validator or
+async `preValidation`/auth via `handle-request.js:133` is an equivalent trigger.)
+
+Run: `node poc-variant-no-header-crash.js`
+
 ## Related (not in this PoC, documented in `../../findings.md`)
 
 - **I-C2** — same root cause reached via **async validation** (a stock AJV
